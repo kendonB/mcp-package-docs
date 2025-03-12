@@ -28,7 +28,7 @@ export interface SearchResult {
 export interface SearchDocArgs {
   package: string;
   query: string;
-  language: "go" | "python" | "npm";
+  language: "go" | "python" | "npm" | "r";
   fuzzy?: boolean;
   projectPath?: string;
 }
@@ -39,7 +39,7 @@ export const isSearchDocArgs = (args: unknown): args is SearchDocArgs => {
     args !== null &&
     typeof (args as SearchDocArgs).package === "string" &&
     typeof (args as SearchDocArgs).query === "string" &&
-    ["go", "python", "npm"].includes((args as SearchDocArgs).language) &&
+    ["go", "python", "npm", "r"].includes((args as SearchDocArgs).language) &&
     (typeof (args as SearchDocArgs).fuzzy === "boolean" ||
       (args as SearchDocArgs).fuzzy === undefined) &&
     (typeof (args as SearchDocArgs).projectPath === "string" ||
@@ -153,6 +153,10 @@ export class SearchUtils {
         // Extract symbol from markdown headings or code blocks
         const npmMatch = firstLine.match(/^#+\s*(?:`([^`]+)`|(\w+))/);
         return npmMatch?.[1] || npmMatch?.[2];
+      case "r":
+        // Extract R function name from documentation
+        const rMatch = firstLine.match(/^([A-Za-z0-9_.]+)\s+/);
+        return rMatch?.[1];
       default:
         return undefined;
     }
@@ -296,6 +300,67 @@ export class SearchUtils {
           });
         }
       }
+    }
+
+    return sections;
+  }
+  
+  /**
+   * Parse R documentation into sections
+   */
+  public parseRDoc(doc: string): Array<{ content: string; type: string }> {
+    const sections: Array<{ content: string; type: string }> = [];
+    let currentSection = '';
+    let currentType = 'description';
+    let currentContent: string[] = [];
+
+    // Parse the R help output into sections
+    const lines = doc.split('\n');
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i].trim();
+      
+      // Section headers in R documentation typically start without indentation and end with ':'
+      if (line && !line.startsWith(' ') && line.endsWith(':')) {
+        // Save the previous section if we have content
+        if (currentContent.length > 0) {
+          sections.push({ 
+            content: `${currentSection}\n\n${currentContent.join('\n')}`.trim(), 
+            type: currentType 
+          });
+          currentContent = [];
+        }
+        
+        // Start a new section
+        currentSection = line.slice(0, -1); // Remove the trailing colon
+        
+        // Set the section type based on the section name
+        if (currentSection === 'Description') {
+          currentType = 'description';
+        } else if (currentSection === 'Usage') {
+          currentType = 'function';
+        } else if (currentSection === 'Arguments') {
+          currentType = 'parameters';
+        } else if (currentSection === 'Examples') {
+          currentType = 'example';
+        } else if (currentSection === 'Value') {
+          currentType = 'return';
+        } else if (currentSection === 'Details') {
+          currentType = 'details';
+        } else {
+          currentType = 'general';
+        }
+      } else {
+        // Add content to current section
+        currentContent.push(line);
+      }
+    }
+    
+    // Add the last section if we have content
+    if (currentContent.length > 0) {
+      sections.push({ 
+        content: `${currentSection}\n\n${currentContent.join('\n')}`.trim(), 
+        type: currentType 
+      });
     }
 
     return sections;

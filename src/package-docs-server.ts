@@ -17,6 +17,7 @@ import { NodeHtmlMarkdown } from 'node-html-markdown';
 import { logger, McpLogger } from './logger.js';
 import { NpmDocsHandler, NpmDocArgs, isNpmDocArgs } from './npm-docs-integration.js';
 import { SearchUtils, DocResult, SearchDocArgs, GoDocArgs, PythonDocArgs, isSearchDocArgs, isGoDocArgs, isPythonDocArgs, SearchResults } from './search-utils.js';
+import { RDocsHandler, RDocArgs, isRDocArgs } from './r-docs-integration.js';
 import Fuse from "fuse.js";
 import { RegistryUtils } from './registry-utils.js';
 import TypeScriptLspClient from "./lsp/typescript-lsp-client.js";
@@ -48,6 +49,7 @@ export class PackageDocsServer {
   private lspClient?: TypeScriptLspClient;
   private lspEnabled: boolean;
   private npmDocsHandler: NpmDocsHandler;
+  private rDocsHandler: RDocsHandler;
   private searchUtils: SearchUtils;
   private registryUtils: RegistryUtils;
 
@@ -61,6 +63,7 @@ export class PackageDocsServer {
   constructor() {
     this.logger = logger.child('PackageDocs');
     this.npmDocsHandler = new NpmDocsHandler();
+    this.rDocsHandler = new RDocsHandler();
     this.searchUtils = new SearchUtils(logger);
     this.registryUtils = new RegistryUtils(logger);
 
@@ -116,7 +119,7 @@ export class PackageDocsServer {
               },
               language: {
                 type: "string",
-                enum: ["go", "python", "npm"],
+                enum: ["go", "python", "npm", "r"],
                 description: "Package language/ecosystem"
               },
               fuzzy: {
@@ -229,6 +232,50 @@ export class PackageDocsServer {
               query: {
                 type: "string",
                 description: "Optional search query to filter documentation content"
+              }
+            },
+            required: ["package"],
+          },
+        },
+        {
+          name: "describe_r_package",
+          description: "Get a brief description of an R package",
+          inputSchema: {
+            type: "object",
+            properties: {
+              package: {
+                type: "string",
+                description: "Package name (e.g. dplyr)",
+              },
+              symbol: {
+                type: "string",
+                description: "Optional symbol name to look up specific documentation",
+              },
+              projectPath: {
+                type: "string",
+                description: "Optional path to project directory"
+              }
+            },
+            required: ["package"],
+          },
+        },
+        {
+          name: "get_r_package_doc",
+          description: "Get full documentation for an R package",
+          inputSchema: {
+            type: "object",
+            properties: {
+              package: {
+                type: "string",
+                description: "Package name (e.g. dplyr)",
+              },
+              symbol: {
+                type: "string",
+                description: "Optional symbol name to look up specific documentation",
+              },
+              projectPath: {
+                type: "string",
+                description: "Optional path to project directory"
               }
             },
             required: ["package"],
@@ -512,6 +559,26 @@ export class PackageDocsServer {
               );
             }
             result = await this.getNpmPackageDoc(request.params.arguments);
+            break;
+            
+          case "describe_r_package":
+            if (!isRDocArgs(request.params.arguments)) {
+              throw new McpError(
+                ErrorCode.InvalidParams,
+                "Invalid describe_r_package arguments"
+              );
+            }
+            result = await this.rDocsHandler.describeRPackage(request.params.arguments);
+            break;
+            
+          case "get_r_package_doc":
+            if (!isRDocArgs(request.params.arguments)) {
+              throw new McpError(
+                ErrorCode.InvalidParams,
+                "Invalid get_r_package_doc arguments"
+              );
+            }
+            result = await this.rDocsHandler.getRPackageDoc(request.params.arguments);
             break;
 
           default:
@@ -912,6 +979,96 @@ help(${packageName})
                 }
               }
             }
+          }
+          break;
+
+        case "r":
+          try {
+            // Check if R is installed and the package is available
+            const isRInstalled = await this.rDocsHandler.isRInstalled();
+            if (!isRInstalled) {
+              return {
+                error: "R is not installed or not in the PATH. Please install R and make sure it's available in your PATH.",
+              };
+            }
+
+            isInstalled = await this.rDocsHandler.isRPackageInstalled(packageName);
+            if (isInstalled) {
+              // Get package overview using a more reliable approach
+              const packageOverviewCmd = `Rscript -e "if(require('${packageName}', quietly = TRUE)) { cat('Package overview for ${packageName}:\\n'); pd <- packageDescription('${packageName}'); for(n in names(pd)) { cat(n, ': ', pd[[n]], '\\n', sep='') } }"`;
+              const { stdout: overviewOutput } = await execAsync(packageOverviewCmd, { maxBuffer: 1024 * 1024 }); // 1MB buffer
+
+              // For search, we want to limit the functions we process to avoid buffer overflow
+              // First get the list of functions that match the search query
+              const searchQueryEscaped = query.replace(/'/g, "\\'");
+              const searchFuncsCmd = `Rscript -e "if(requireNamespace('${packageName}', quietly = TRUE)) { pkg_funcs <- ls('package:${packageName}'); matches <- grep('${searchQueryEscaped}', pkg_funcs, ignore.case=TRUE); if(length(matches) > 0) { cat(pkg_funcs[matches], sep='\\n') } else { cat('') } }"`;
+              const { stdout: matchingFuncs } = await execAsync(searchFuncsCmd);
+              
+              // Only process the matching functions or a subset of functions if there are too many
+              const functionsToProcess = matchingFuncs.trim().split('\n').filter(f => f !== '');
+              const limitedFuncs = functionsToProcess.slice(0, Math.min(10, functionsToProcess.length)); // Limit to 10 functions max
+              
+              let functionsOutput = '';
+              // Process each function individually to avoid buffer overflow
+              for(const func of limitedFuncs) {
+                try {
+                  // Use a more focused approach to extract only relevant information for search
+                  // This reduces buffer size and focuses on the most useful information
+                  const funcCmd = `Rscript -e "cat('\\n====FUNCTION====\\n'); cat('${func}'); cat('\\n'); tryCatch({ help_obj <- help('${func}', package = '${packageName}'); txt <- capture.output(print(help_obj)); matches <- grep('${searchQueryEscaped}', txt, ignore.case=TRUE); context_lines <- c(); if(length(matches) > 0) { for(m in matches) { start_line <- max(1, m - 3); end_line <- min(length(txt), m + 3); context_lines <- c(context_lines, txt[start_line:end_line]) } } else { context_lines <- txt[1:min(15, length(txt))] }; cat(paste(unique(context_lines), collapse='\\n')); }, error = function(e) { cat('No documentation available') })"`;
+                  
+                  // Use maxBuffer to increase the buffer size for large outputs
+                  const { stdout: funcOutput } = await execAsync(funcCmd, { maxBuffer: 1024 * 1024 }); // 1MB buffer
+                  functionsOutput += funcOutput;
+                } catch (funcError) {
+                  this.logger.error(`Error getting documentation for ${packageName}::${func}:`, funcError);
+                  functionsOutput += `\n====FUNCTION====\n${func}\nError fetching documentation`;
+                }
+              }
+
+              // Process and split the function documentation
+              const functionDocs = functionsOutput.split('====FUNCTION====').filter(Boolean);
+              
+              docContent = [];
+              
+              // Add overview as the first item
+              docContent.push({
+                content: overviewOutput,
+                type: 'description'
+              });
+              
+              // Process each function's documentation
+              for (const funcDoc of functionDocs) {
+                const lines = funcDoc.trim().split('\n');
+                const funcName = lines[0].trim();
+                const funcContent = lines.slice(1).join('\n').trim();
+                
+                if (funcContent && !funcContent.includes('No documentation available')) {
+                  // Parse the R documentation into sections
+                  const parsedDoc = this.searchUtils.parseRDoc(funcContent);
+                  
+                  // Add each section as a separate item
+                  docContent.push(...parsedDoc.map(section => ({
+                    ...section,
+                    content: `${funcName}\n\n${section.content}`
+                  })));
+                }
+              }
+            } else {
+              return {
+                error: `Package ${packageName} is not installed. Try installing it with 'install.packages("${packageName}")' in R.`,
+                suggestInstall: true
+              };
+            }
+          } catch (error) {
+            this.logger.error(`Error searching R package ${packageName}:`, error);
+            return {
+              error: `Failed to search R package documentation: ${error instanceof Error ? error.message : String(error)}`,
+              searchResults: {
+                results: [],
+                totalResults: 0,
+                error: error instanceof Error ? error.message : String(error)
+              }
+            };
           }
           break;
 

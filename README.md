@@ -12,6 +12,7 @@ An MCP (Model Context Protocol) server that provides LLMs with efficient access 
   - Go packages via `go doc`
   - Python libraries via built-in `help()`
   - NPM packages via registry documentation (including private registries)
+  - R packages via R's built-in documentation system
 
 - **Smart Documentation Parsing**:
   - Structured output with description, usage, and examples
@@ -132,7 +133,7 @@ Search within package documentation
   "arguments": {
     "package": "requests",    // required: package name
     "query": "authentication", // required: search query
-    "language": "python",     // required: "go", "python", or "npm"
+    "language": "python",     // required: "go", "python", "npm", or "r"
     "fuzzy": true            // optional: enable fuzzy matching (default: true)
   }
 }
@@ -148,6 +149,34 @@ Fetches NPM package documentation from both public and private registries. Autom
   "arguments": {
     "package": "axios",      // required - supports both scoped (@org/pkg) and unscoped packages
     "version": "1.6.0"       // optional
+  }
+}
+```
+
+#### describe_r_package
+
+Fetches basic R package documentation
+
+```typescript
+{
+  "name": "describe_r_package",
+  "arguments": {
+    "package": "base",      // required - name of the R package
+    "symbol": "mean"        // optional - specific R function/symbol to lookup
+  }
+}
+```
+
+#### get_r_package_doc
+
+Fetches comprehensive R package documentation with examples
+
+```typescript
+{
+  "name": "get_r_package_doc",
+  "arguments": {
+    "package": "base",      // required - name of the R package
+    "symbol": "mean"        // optional - specific R function/symbol to lookup
   }
 }
 ```
@@ -224,13 +253,23 @@ Get diagnostic information (errors, warnings) for a document
 #### Looking up Documentation
 
 ```typescript
-// Looking up documentation
-const docResult = await use_mcp_tool({
+// Looking up Python documentation
+const pythonDocResult = await use_mcp_tool({
   server_name: "package-docs",
   tool_name: "lookup_python_doc",
   arguments: {
     package: "requests",
     symbol: "post"
+  }
+});
+
+// Looking up R documentation
+const rDocResult = await use_mcp_tool({
+  server_name: "package-docs",
+  tool_name: "describe_r_package",
+  arguments: {
+    package: "stats",
+    symbol: "median"
   }
 });
 
@@ -242,6 +281,18 @@ const searchResult = await use_mcp_tool({
     package: "requests",
     query: "authentication headers",
     language: "python",
+    fuzzy: true
+  }
+});
+
+// Searching within R documentation
+const rSearchResult = await use_mcp_tool({
+  server_name: "package-docs",
+  tool_name: "search_package_docs",
+  arguments: {
+    package: "base",
+    query: "mean",
+    language: "r",
     fuzzy: true
   }
 });
@@ -265,6 +316,7 @@ const hoverResult = await use_mcp_tool({
 - Node.js >= 20
 - Go (for Go package documentation)
 - Python 3 (for Python package documentation)
+- R (for R package documentation)
 - Internet connection (for NPM package documentation)
 - Language servers (for LSP functionality):
   - TypeScript/JavaScript: `npm install -g typescript-language-server typescript`
